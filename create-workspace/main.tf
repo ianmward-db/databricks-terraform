@@ -85,6 +85,11 @@ variable "databricks_account_id" {
   type        = string
 }
 
+variable "azure_tenant_id" {
+  description = "Azure Tenant ID (required to manage Unity Catalog metastore)"
+  type        = string
+}
+
 variable "metastore_name" {
   description = "Name of the Unity Catalog metastore to create"
   type        = string
@@ -108,7 +113,7 @@ variable "metastore_container_name" {
 ########################################
 locals {
   # Databricks expects region slugs like 'australiaeast'
-  databricks_region = replace(lower(var.location), " ", "-")
+  databricks_region = replace(lower(var.location), " ", "")
 }
 
 ########################################
@@ -173,6 +178,21 @@ resource "azurerm_role_assignment" "connector_storage_blob_data_contributor" {
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
 }
+resource "azurerm_role_assignment" "connector_storage_eventgrid_event_subscription_contributor" {
+  scope                = azurerm_storage_account.metastore.id
+  role_definition_name = "EventGrid EventSubscription Contributor"
+  principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
+}
+resource "azurerm_role_assignment" "connector_storage_account_contributor" {
+  scope                = azurerm_storage_account.metastore.id
+  role_definition_name = "Storage Account Contributor"
+  principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
+}
+resource "azurerm_role_assignment" "connector_storage_queue_data_contributor" {
+  scope                = azurerm_storage_account.metastore.id
+  role_definition_name = "Storage Queue Data Contributor"
+  principal_id         = azurerm_databricks_access_connector.this.identity[0].principal_id
+}
 
 # Allow some time for role assignment propagation
 resource "time_sleep" "wait_for_rbac" {
@@ -187,7 +207,16 @@ provider "databricks" {
   alias      = "mws"
   host       = "https://accounts.azuredatabricks.net"
   account_id = var.databricks_account_id
-  auth_type  = "azure-cli"
+  auth_type           = "azure-cli"
+  azure_tenant_id     = var.azure_tenant_id
+}
+
+# Databricks workspace-level provider (for storage credential/external location/namespace)
+provider "databricks" {
+  alias     = "ws"
+  host      = var.databricks_workspace_url
+  auth_type           = "azure-cli"
+  azure_tenant_id     = var.azure_tenant_id
 }
 
 # Look up the workspace to get its Databricks workspace_id for assignment
@@ -199,12 +228,23 @@ data "azurerm_databricks_workspace" "this" {
 ########################################
 # Unity Catalog Metastore and assignment
 ########################################
-resource "databricks_metastore" "this" {
-  provider     = databricks.mws
-  name         = var.metastore_name
-  region       = local.databricks_region
-  storage_root = "abfss://${azurerm_storage_container.metastore.name}@${azurerm_storage_account.metastore.name}.dfs.core.windows.net/"
+resource "databricks_storage_credential" "metastore_uc" {
+  provider = databricks.ws
+  name     = "uc-metastore-cred-${random_string.suffix.result}"
+
+  azure_managed_identity {
+    access_connector_id = azurerm_databricks_access_connector.this.id
+  }
+
+  depends_on = [
+    time_sleep.wait_for_rbac,
+    databricks_metastore_assignment.this
+  ]
 }
+
+// Removed external location for container root to avoid overlap with
+// auto-created 'metastore_root_location' (created during metastore setup).
+
 
 resource "databricks_metastore_data_access" "default" {
   provider    = databricks.mws
@@ -219,11 +259,25 @@ resource "databricks_metastore_data_access" "default" {
   depends_on = [time_sleep.wait_for_rbac]
 }
 
+resource "databricks_metastore" "this" {
+  provider     = databricks.mws
+  name         = var.metastore_name
+  region       = local.databricks_region
+  force_destroy = true
+  storage_root = "abfss://${azurerm_storage_container.metastore.name}@${azurerm_storage_account.metastore.name}.dfs.core.windows.net/metastore/"
+}
+
+resource "databricks_default_namespace_setting" "this" {
+  provider = databricks.ws
+  namespace {
+    value = "main"
+  }
+}
+
 resource "databricks_metastore_assignment" "this" {
   provider     = databricks.mws
   metastore_id = databricks_metastore.this.id
   workspace_id = data.azurerm_databricks_workspace.this.workspace_id
-  default_catalog_name = "main"
 }
 
 ########################################
