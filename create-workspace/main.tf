@@ -48,7 +48,7 @@ variable "sku" {
 
 # Declared to avoid errors if present in terraform.tfvars in this folder
 variable "databricks_workspace_url" {
-  description = "Unused here; declared to avoid undeclared variable errors"
+  description = "Unused; workspace URL is now derived from azurerm_databricks_workspace. Declared to avoid undeclared variable errors"
   type        = string
   default     = null
 }
@@ -285,14 +285,13 @@ output "metastore_storage_root" {
 }
 
 
-# Now stop and create/update the Databricks CLI profile azure and login using databricks auth login azure
-
-
 resource "databricks_default_namespace_setting" "this" {
   provider = databricks.ws
   namespace {
     value = "main"
   }
+
+  depends_on = [databricks_metastore_assignment.this]
 }
 
 ########################################
@@ -312,9 +311,14 @@ resource "databricks_storage_credential" "metastore_uc" {
   ]
 }
 
-# Databricks workspace-level provider (for storage credential/external location/namespace)
+
+# Databricks workspace-level provider (for storage credential/external location/namespace).
+# Host and workspace resource ID come from the workspace created in this same config,
+# so no manual URL copy or `databricks auth login` step is needed.
 provider "databricks" {
-  alias     = "ws"
-  host      = var.databricks_workspace_url
-  auth_type           = "azure-cli"
+  alias                       = "ws"
+  host                        = "https://${azurerm_databricks_workspace.this.workspace_url}"
+  auth_type                   = "azure-cli"
+  azure_tenant_id             = var.azure_tenant_id
+  azure_workspace_resource_id = azurerm_databricks_workspace.this.id
 }
