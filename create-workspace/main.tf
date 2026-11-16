@@ -129,6 +129,9 @@ resource "azurerm_databricks_workspace" "this" {
   resource_group_name = azurerm_resource_group.this.name
   location            = azurerm_resource_group.this.location
   sku                 = var.sku
+  tags                = {
+    owner             = "ian.ward@databricks.com"
+  }
 }
 
 ########################################
@@ -152,6 +155,11 @@ resource "azurerm_storage_account" "metastore" {
   account_replication_type = "LRS"
   account_kind             = "StorageV2"
   is_hns_enabled           = true
+  allow_nested_items_to_be_public = true
+  tags                = {
+    owner             = "ian.ward@databricks.com"
+  }
+
 }
 
 resource "azurerm_storage_container" "metastore" {
@@ -170,6 +178,9 @@ resource "azurerm_databricks_access_connector" "this" {
 
   identity {
     type = "SystemAssigned"
+  }
+  tags                = {
+    owner             = "ian.ward@databricks.com"
   }
 }
 
@@ -211,35 +222,11 @@ provider "databricks" {
   azure_tenant_id     = var.azure_tenant_id
 }
 
-# Databricks workspace-level provider (for storage credential/external location/namespace)
-provider "databricks" {
-  alias     = "ws"
-  host      = var.databricks_workspace_url
-  auth_type           = "azure-cli"
-  azure_tenant_id     = var.azure_tenant_id
-}
 
 # Look up the workspace to get its Databricks workspace_id for assignment
 data "azurerm_databricks_workspace" "this" {
   name                = azurerm_databricks_workspace.this.name
   resource_group_name = azurerm_resource_group.this.name
-}
-
-########################################
-# Unity Catalog Metastore and assignment
-########################################
-resource "databricks_storage_credential" "metastore_uc" {
-  provider = databricks.ws
-  name     = "uc-metastore-cred-${random_string.suffix.result}"
-
-  azure_managed_identity {
-    access_connector_id = azurerm_databricks_access_connector.this.id
-  }
-
-  depends_on = [
-    time_sleep.wait_for_rbac,
-    databricks_metastore_assignment.this
-  ]
 }
 
 // Removed external location for container root to avoid overlap with
@@ -267,12 +254,6 @@ resource "databricks_metastore" "this" {
   storage_root = "abfss://${azurerm_storage_container.metastore.name}@${azurerm_storage_account.metastore.name}.dfs.core.windows.net/metastore/"
 }
 
-resource "databricks_default_namespace_setting" "this" {
-  provider = databricks.ws
-  namespace {
-    value = "main"
-  }
-}
 
 resource "databricks_metastore_assignment" "this" {
   provider     = databricks.mws
@@ -304,3 +285,36 @@ output "metastore_storage_root" {
 }
 
 
+# Now stop and create/update the Databricks CLI profile azure and login using databricks auth login azure
+
+
+resource "databricks_default_namespace_setting" "this" {
+  provider = databricks.ws
+  namespace {
+    value = "main"
+  }
+}
+
+########################################
+# Unity Catalog Metastore and assignment
+########################################
+resource "databricks_storage_credential" "metastore_uc" {
+  provider = databricks.ws
+  name     = "uc-metastore-cred-${random_string.suffix.result}"
+
+  azure_managed_identity {
+    access_connector_id = azurerm_databricks_access_connector.this.id
+  }
+
+  depends_on = [
+    time_sleep.wait_for_rbac,
+    databricks_metastore_assignment.this
+  ]
+}
+
+# Databricks workspace-level provider (for storage credential/external location/namespace)
+provider "databricks" {
+  alias     = "ws"
+  host      = var.databricks_workspace_url
+  auth_type           = "azure-cli"
+}
